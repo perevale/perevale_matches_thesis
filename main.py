@@ -24,9 +24,10 @@ warnings.filterwarnings("ignore")
 ex.observers.append(MongoObserver(url='localhost:27017',
                                   db_name='sacred'))
 def read_data(filename):
+    names = ['year', 'league', 'time','home_team','away_team', 'home_score','away_score','difference_score','result', 'country']
     """Read the data from csv with correct data types."""
-    data = read_csv(filename, header=None, names=list('abcdefghij'),
-                    dtype=dict(zip(list('abcdefghij'), [int] + [str] * 4 + [int] * 3 + [str] * 2)))
+    data = read_csv(filename, header=None, names=names,
+                    dtype=dict(zip(names, [int] + [str] * 4 + [int] * 3 + [str] * 2)))
     return data
 
 
@@ -34,21 +35,23 @@ def clean_data(data: pd.DataFrame, convert_to_numpy=True, allow_draw=False) -> n
     """Add a column to transform result of the match into int, """
     # result ot int
     conditions = [
-        (data['i'] == 'W'),
-        (data['i'] == 'L'),
-        (data['i'] == 'D')]
+        (data['result'] == 'W'),
+        (data['result'] == 'L'),
+        (data['result'] == 'D')]
     choices = [1, 0, 2]
     data['wdb'] = np.select(conditions, choices)
 
     # ignore the draw results
     if not allow_draw:
-        data = data[data.i != 'D']
+        data = data[data['result'] != 'D']
 
     # print some metadata
-    won = len(data[data['i'] == "W"])
-    lost = len(data[data['i'] == "L"])
+    won = len(data[data['result'] == "W"])
+    lost = len(data[data['result'] == "L"])
+    draw = len(data[data['result'] == "D"])
     total = len(data)
-    print("Won:", won, won / total * 100, ", Lost:", lost, lost / total * 100)
+    # print("Won:", won, won / total * 100, ", Lost:", lost, lost / total * 100)
+    print("Won: {}%, Lost: {}%, Draw: {}%".format(won/total, lost/total, draw/total))
 
     # convert to numpy
     if convert_to_numpy:
@@ -79,24 +82,19 @@ def create_model(n_teams, result , activation='selu', loss='binary_crossentropy'
     # x = Subtract()([output_tensor_1, output_tensor_2])
 
     x = concatenate([output_tensor_1, output_tensor_2], axis=-1)
-    # x = Dense(128, activation='relu')(x)
-    # x = Dense(64, activation='relu')(x)
-    # x = Dense(32, activation='relu')(x)
-    # x = Dense(16, activation='relu')(x)
-    # x = Dense(8, activation='relu')(x)
-    # x = Dense(4, activation='relu')(x)
     x = Dense(128, activation=activation)(x)
-    # x = Dense(64, activation='selu')(x)
-    # x = Dense(32, activation='selu')(x)
-    # x = Dense(16, activation='selu')(x)
+    # x = Dense(64, activation=activation)(x)
+    # x = Dense(32, activation=activation)(x)
+    # x = Dense(16, activation=activation)(x)
     x = Dense(8, activation=activation)(x)
-    # x = Dense(4, activation='selu')(x)
+    # x = Dense(4, activation=activation)(x)
 
     predictions = Dense(result, activation='sigmoid')(x)
     model = Model(inputs=[input_tensor_1, input_tensor_2], outputs=predictions)
     model.compile(optimizer=optimizer,
                   loss=loss,
-                  metrics=['accuracy'])
+                  metrics=['categorical_accuracy'])
+                  # metrics=['accuracy'])
     return model#, em_tensor
 
 @ex.config
@@ -153,7 +151,7 @@ def grid_search(data, output):
     # df = df.iloc[1:]
     return best_acc,best_values
 @ex.capture
-def run_model(data: np.array, result, activation='selu', loss='binary_crossentropy', opt = 'adam'):
+def run_model(data: np.array, result, activation='selu', loss='categorical_crossentropy', opt = 'adam'):
     # data = read_data(input_file)  # pandas dataframe
     # data = clean_data(data)  # numpy array
 
@@ -192,24 +190,39 @@ def run_model(data: np.array, result, activation='selu', loss='binary_crossentro
     # print(p)
     # p.to_csv('output_ranking_table.csv')
     # ranking_table(data)
+    predictions = model.predict([X_test[:, 0], X_test[:, 1]])
+    ground_truth = onehot_encoder.fit_transform(y_test.reshape(-1,1))
+    acc = np.sum(np.logical_not(np.argmax(predictions, axis=1) == np.argmax(ground_truth, axis=1)))/np.shape(y_test)[0]
 
     loss, accuracy = model.evaluate([X_test[:, 0], X_test[:, 1]], onehot_encoder.fit_transform(y_test.reshape(-1,1)), verbose=0)
     print('Accuracy: %f' % (accuracy * 100))
+    print("My accuracy =", acc, "Keras accuracy =", accuracy)
+
+    plt.subplot(211)
+    plt.title('Loss')
+    plt.plot(history.history['loss'], label='train')
+    plt.plot(history.history['val_loss'], label='test')
+    plt.xticks(range(len(history.history['loss'])),
+               range(1, len(history.history['loss']) + 1))
+
+    plt.xlabel('epochs')
+    plt.legend()
+    # plot accuracy during training
+    plt.subplot(212)
+    plt.title('Accuracy')
+    plt.plot(history.history['categorical_accuracy'], label='train')
+    plt.plot(history.history['val_categorical_accuracy'], label='test')
+    plt.xlabel('epochs')
+    plt.xticks(range(len(history.history['categorical_accuracy'])), range(1,len(history.history['categorical_accuracy'])+1))
+    plt.legend()
+    plt.show()
+
     return accuracy
+
+
+
     # pca_embedding(output, teams)
 
-    # plt.subplot(211)
-    # plt.title('Loss')
-    # plt.plot(history.history['loss'], label='train')
-    # plt.plot(history.history['val_loss'], label='test')
-    # plt.legend()
-    # # plot accuracy during training
-    # plt.subplot(212)
-    # plt.title('Accuracy')
-    # plt.plot(history.history['acc'], label='train')
-    # plt.plot(history.history['val_acc'], label='test')
-    # plt.legend()
-    # plt.show()
 
 
 def pca_embedding(input, teams):
@@ -310,21 +323,53 @@ def sort_csv(input_file, output_file, column):
             csv_out.writerow(row)
 
 
+def train_all_leagues(input_data, input_leagues, result_leagues):
+    all_data = read_data(input_data)
+    accuracies = []
+    with open(input_leagues, 'r') as csv_file, open(result_leagues, 'w+', newline='') as out:
+        csv_reader = csv.reader(csv_file, delimiter=',')
+        for row in csv_reader:
+            print("--------------------------------------------------------------------------------------------")
+            league = row[1]
+            league_data = all_data[all_data['league'] == league]
+            league_data = clean_data(league_data, allow_draw=True, convert_to_numpy=True)
+            accuracy_league = run_model(league_data, 3)
+            csv_out = csv.writer(out)
+            csv_out.writerow([league, accuracy_league])
+            accuracies.append(accuracy_league)
+    mean = np.mean(accuracies)
+    var = np.var(accuracies)
+    return mean, var
+
 
 @ex.automain
 def main():
-    # input_data = r'../bet_ISDB_Leagues.csv'
-    input_data = r'../test_baseline.csv'
-    output_elo = r'../output_elo.csv'
-    input = read_data(input_data)
-    grid_search_file = 'grid_search.csv'
-    grid_sorted = 'grid_sorted.csv'
-    print()
-    data = clean_data(input, allow_draw=False, convert_to_numpy=True)
-    run_model(data, 2)
-    data = clean_data(input, allow_draw=True, convert_to_numpy=True)
-    run_model(data, 3)
+    input_data = r'bet_ISDB_Leagues.csv'
+    input_leagues = r'league_code.csv'
+    result_leagues = r'result_leagues.csv'
+
+    mean, var = train_all_leagues(input_data, input_leagues, result_leagues)
+    print("Mean accuracy for all leagues:", mean, "Variance accuracy for all leagues:", var)
+
+
+
+
+
+    # input_data = r'./test_baseline.csv'
+    # input = read_data(input_data)
+    #
+    # # data = clean_data(input, allow_draw=False, convert_to_numpy=True)
+    # # run_model(data, 2)
+    # data = clean_data(input, allow_draw=True, convert_to_numpy=True)
+    # run_model(data, 3)
+
+    # grid_search_file = 'grid_search.csv'
+    # grid_sorted = 'grid_sorted.csv'
     # best_acc,best_values = grid_search(data,grid_search_file)
     # print(best_acc, best_values)
-    # ranking_elo(input_data, output_elo)
     # sort_csv(grid_search_file, grid_sorted, 3)
+
+
+
+    # output_elo = r'./output_elo.csv'
+    # ranking_elo(input_data, output_elo)
